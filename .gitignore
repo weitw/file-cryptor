@@ -1,0 +1,6 @@
+### NetBeans ###
+/dist/
+
+build/
+
+*.spec
