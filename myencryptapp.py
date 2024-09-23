@@ -48,8 +48,8 @@ def encrypt_file_task(file_path, key_data):
         return
     uuid_name = generate_uuid()
     new_file_path = os.path.join(os.path.dirname(file_path), uuid_name)
-    os.rename(file_path, new_file_path)
     original_header = file_utils.corrupt_file(file_path)
+    os.rename(file_path, new_file_path)
     key_data[uuid_name] = {
         "old_file_path": file_path,
         "new_file_path": new_file_path,
@@ -63,52 +63,26 @@ def encrypt_dir_task(dir_path, key_data):
         return
     uuid_name = generate_uuid().upper()  # 目录名用大写
     new_file_path = os.path.join(os.path.dirname(dir_path), uuid_name)
+    os.rename(dir_path, new_file_path)
     key_data[uuid_name] = {
         "old_dir_path": dir_path,
         "new_dir_path": new_file_path,
     }
+    return new_file_path
 
 
-def encrypt_dir_dfs(dir_path, key_data):
-    """
-    递归遍历目录，将所有子目录和当前目录名按顺序放入 key_data 中
-    确保先处理子目录，再处理当前目录
-    """
-    # 确保目录存在
-    if not os.path.isdir(dir_path):
-        raise ValueError(f"{dir_path} 不是一个有效的目录")
-    # 遍历当前目录的所有条目
-    has_sub_dir = False
-    for entry in os.listdir(dir_path):
-        entry_path = os.path.join(dir_path, entry)
-        # 如果是子目录，先递归处理子目录
-        if os.path.isdir(entry_path):
-            has_sub_dir = True
-            encrypt_dir_dfs(entry_path, key_data)
-    if not has_sub_dir:
-        print(f"dir_path={dir_path}")
-    # 处理当前目录（保证当前目录在所有子目录处理完成后才加入 key_data）
-    dir_name = os.path.basename(dir_path)
-
-    uuid_name = generate_uuid()  # 假设这是生成 UUID 的函数
-    key_data[uuid_name] = {
-        "dir_name": dir_name,
-        "dir_path": dir_path
-    }
-
-
-def decrypt_dir_task(uuid_name, file_info, key_data):
+def decrypt_dir_task(dir_path, key_data):
     try:
-        old_file_path = file_info["old_dir_path"]
-        new_file_path = file_info["new_dir_path"]
-        if not os.path.exists(new_file_path):
-            print(f"目录{new_file_path}不存在，无需解密")
-            return
-        os.rename(new_file_path, old_file_path)
-        del key_data[uuid_name]
-        print(f"解密目录名 {uuid_name} 成功")
+        for uuid_name, file_info in list(key_data.items()):
+            if file_info.get("new_dir_path") and file_info.get("new_dir_path") == dir_path and os.path.exists(file_info.get("new_dir_path")):
+                print(f"加密目录{file_info['new_dir_path']}恢复原名称{file_info['old_dir_path']}")
+                os.rename(file_info["new_dir_path"], file_info["old_dir_path"])
+                del key_data[uuid_name]
+                return file_info["old_dir_path"]
+        print(f"解密目录名 {dir_path} 失败，没有找到该目录")
     except Exception as e:
-        print(f"解密目录名 {uuid_name} 失败: {e}")
+        print(f"解密目录名 {dir_path} 失败: {e}")
+    return None
 
 
 class FileEncryptor:
@@ -118,7 +92,8 @@ class FileEncryptor:
         self.dir_path = dir_path
         self.root_dir = os.path.dirname(dir_path)
         self.sub_dir = os.path.basename(dir_path)
-        self.key_file_path = os.path.join(f"{dir_path}.json")
+        self.key_file_path = os.path.join(f"{dir_path}-file.json")
+        self.key_dir_path = os.path.join(f"{dir_path}-dir.json")
         self.json_encrypt = json_encrypt
 
     # 读取 key 文件时进行解密，并验证密钥是否正确
@@ -157,34 +132,29 @@ class FileEncryptor:
         file_utils.remove_file(f"{self.dir_path}.json")
         try:
             # 先递归的加密目录，目录加密完再加密文件
-            for root, dirs, files in os.walk(self.dir_path):
-                for dir_name in dirs:
-                    dir_path = os.path.join(root, dir_name)
-                    encrypt_dir_task(dir_path, key_data)
-            # with concurrent.futures.ThreadPoolExecutor() as executor:
-            #     futures = []
-            #     for root, dirs, files in os.walk(self.dir_path):
-            #         for file in files:
-            #             file_path = os.path.join(root, file)
-            #             futures.append(executor.submit(encrypt_file_task, file_path, key_data))
-            #     for future in concurrent.futures.as_completed(futures):
-            #         try:
-            #             future.result()
-            #         except Exception as e:
-            #             print(f"文件加密过程中出现错误: {e}")
+            self.encrypt_dir_dfs(self.dir_path, key_data)
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = []
+                for root, dirs, files in os.walk(self.dir_path):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        futures.append(executor.submit(encrypt_file_task, file_path, key_data))
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"文件加密过程中出现错误: {e}")
         except Exception as er:
             print(f"加密文件出现未知错误，文件恢复-start,e={er}")
             for uuid_name, file_info in list(key_data.items()):
                 if file_info.get("old_file_path"):
                     file_utils.restore_file(file_info.get("old_file_path"), file_info.get("original_header"))
+                    try:
+                        os.rename(file_info["new_file_path"], file_info["old_file_path"])
+                    except Exception as e:
+                        print(f"文件名{file_info.get('new_file_path')}恢复失败：{e}")
+            self.decrypt_dir_dfs(self.dir_path, key_data)  # 恢复目录名
         self.save_key_file(key_data)
-        for uuid_name, file_info in list(key_data.items()):
-            # if os.path.exists(file_info["old_file_path"]):
-            #     print(f"源文件{file_info['old_file_path']}重命名成{file_info['new_file_path']}")
-            #     os.rename(file_info["old_file_path"], file_info["new_file_path"])
-            if os.path.exists(file_info["old_dir_path"]):
-                print(f"源目录{file_info['old_dir_path']}重命名成{file_info['new_dir_path']}")
-                os.rename(file_info["old_dir_path"], file_info["new_dir_path"])
         print(f"加密完成，key 文件生成在 {self.dir_path}{self.sub_dir} 目录下")
 
     def decrypt_directory(self):
@@ -204,17 +174,51 @@ class FileEncryptor:
                 except Exception as e:
                     print(f"文件解密过程中出现错误: {e}")
         # 递归的解密目录
-        for uuid_name, file_info in list(key_data.items()):
-            if "old_dir_path" in file_info:
-                decrypt_dir_task(uuid_name, file_info, key_data)
+        self.decrypt_dir_dfs(self.dir_path, key_data)
         self.save_key_file(key_data)
         print(f"解密完成，目录恢复至 {self.dir_path}")
 
+    def encrypt_dir_dfs(self, dir_path, key_data):
+        """
+        深度优先，递归遍历目录，将所有子目录和当前目录名按顺序放入 key_data 中
+        确保先处理当前目录，再处理子目录
+        """
+        # 确保目录存在
+        if not os.path.isdir(dir_path):
+            print(f"{dir_path} 不是一个有效的目录")
+            return
+        # 获取当前目录下的所有子目录
+        if not dir_path:
+            return
+        if dir_path != self.dir_path:
+            dir_path = encrypt_dir_task(dir_path, key_data)
+        for item in os.listdir(dir_path):
+            item_path = os.path.join(dir_path, item)
+            if os.path.isdir(item_path):
+                self.encrypt_dir_dfs(item_path, key_data)
+
+    def decrypt_dir_dfs(self, dir_path, key_data):
+        """
+        递归遍历目录，将所有子目录和当前目录名按顺序放入 key_data 中
+        解密逻辑跟加密逻辑相反，先处理子目录，再处理当前目录
+        """
+        # 确保目录存在
+        if not os.path.isdir(dir_path):
+            print(f"{dir_path} 不是一个有效的目录")
+            return
+        # 获取当前目录下的所有子目录
+        if not dir_path:
+            return
+        for item in os.listdir(dir_path):
+            item_path = os.path.join(dir_path, item)
+            if os.path.isdir(item_path):
+                self.decrypt_dir_dfs(item_path, key_data)
+        if dir_path != self.dir_path:
+            decrypt_dir_task(dir_path, key_data)
+
 
 if __name__ == '__main__':
-    file_encrypt = FileEncryptor("wtw1029*#", "F:\\testtest")
-    # file_encrypt.encrypt_directory()
-    # file_encrypt.decrypt_directory()
-    keys = {}
-    encrypt_dir_dep_task("F:\\testtest", keys)
-    # print(f"keys={keys}")
+    passwd = input("请输入密码：")
+    file_encrypt = FileEncryptor(passwd, "F:\\testtest")
+    file_encrypt.encrypt_directory()
+    file_encrypt.decrypt_directory()
