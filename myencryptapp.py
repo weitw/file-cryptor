@@ -218,6 +218,7 @@ class FileEncryptor:
 
 
 if __name__ == '__main__':
-    file_encrypt = FileEncryptor("wtw1029*#", "F:\\testtest")
+    passwd = input("请输入密码：")
+    file_encrypt = FileEncryptor(passwd, "F:\\testtest")
     file_encrypt.encrypt_directory()
     file_encrypt.decrypt_directory()
